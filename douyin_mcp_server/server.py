@@ -299,6 +299,12 @@ async def extract_douyin_text(
             raise ValueError(f"不支持的 asr_provider: {provider}，可选值: local, dashscope")
 
         dashscope_key = os.getenv(DASHSCOPE_API_KEY_ENV) or os.getenv(LEGACY_API_KEY_ENV, "")
+        if provider == "dashscope" and not dashscope_key:
+            raise ValueError(
+                f"未设置 {DASHSCOPE_API_KEY_ENV}（兼容旧变量 {LEGACY_API_KEY_ENV}），"
+                "请在环境变量中配置阿里云百炼 API Key"
+            )
+
         processor = DouyinProcessor(dashscope_key if provider == "dashscope" else "", model)
         
         # 解析视频链接
@@ -308,11 +314,6 @@ async def extract_douyin_text(
         # 根据后端提取文本
         ctx.info(f"正在使用 {provider} 后端提取文本...")
         if provider == "dashscope":
-            if not dashscope_key:
-                raise ValueError(
-                    f"未设置 {DASHSCOPE_API_KEY_ENV}（兼容旧变量 {LEGACY_API_KEY_ENV}），"
-                    "请在环境变量中配置阿里云百炼 API Key"
-                )
             text_content = processor.extract_text_from_video_url(video_info["url"])
         else:
             video_path = await processor.download_video(video_info, ctx)

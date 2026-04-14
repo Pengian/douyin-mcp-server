@@ -150,6 +150,50 @@ uv run python web/app.py
 - `DOUYIN_LOCAL_ASR_DEVICE`：默认 `auto`
 - `DOUYIN_LOCAL_ASR_COMPUTE_TYPE`：默认 `int8`
 
+### 本地模型资源消耗（faster-whisper）
+
+下表为常见模型的经验值（受音频长度、并发、设备性能影响）：
+
+| 模型 | 典型下载体积 | 典型运行内存 | 速度/精度建议 |
+|------|--------------|--------------|---------------|
+| `tiny` | ~75MB | ~1-2GB | 速度最快，精度最低 |
+| `base` | ~140MB | ~2-3GB | 轻量场景可用 |
+| `small`（默认） | ~460MB | ~3-5GB | 速度与精度平衡 |
+| `medium` | ~1.5GB | ~6-10GB | 精度更高，资源更高 |
+| `large-v3` | ~3GB+ | ~10GB+ | 高精度，资源消耗最大 |
+
+建议：
+
+- Apple Silicon / 普通 CPU：优先 `small + int8`
+- NVIDIA GPU：可尝试 `float16` 或 `int8_float16`
+- 内存紧张场景：降级到 `base` 或 `tiny`
+
+### 模型下载与平台兼容（社区成熟方案）
+
+`faster-whisper` 默认通过 Hugging Face Hub 下载模型并缓存到本地（通常是 `~/.cache/huggingface/hub`）。
+
+1. 默认自动下载（首次加载模型时触发）  
+2. 预下载（推荐用于离线部署或预热）
+
+```bash
+python3 - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id="Systran/faster-whisper-small")
+PY
+```
+
+3. 中国网络或企业网络兼容（社区常用）
+
+```bash
+export HF_ENDPOINT="https://hf-mirror.com"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+```
+
+4. Windows / macOS / Linux 通用建议  
+- 使用 `device=auto`（默认）  
+- CPU 场景优先 `compute_type=int8`（默认）  
+- GPU 场景再按驱动与算力调优 `compute_type`
+
 ### 对话示例
 
 ```
