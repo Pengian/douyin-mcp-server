@@ -16,7 +16,8 @@ import requests
 import tempfile
 import asyncio
 from pathlib import Path
-from typing import Optional, Tuple
+from threading import Lock
+from typing import Optional, Tuple, Literal
 import ffmpeg
 from tqdm.asyncio import tqdm
 from urllib import request
@@ -29,7 +30,7 @@ from mcp.server.fastmcp import Context
 
 # 创建 MCP 服务器实例
 mcp = FastMCP("Douyin MCP Server", 
-              dependencies=["requests", "ffmpeg-python", "tqdm", "dashscope"])
+              dependencies=["requests", "ffmpeg-python", "tqdm", "dashscope", "faster-whisper"])
 
 # 请求头，模拟移动端访问
 HEADERS = {
@@ -38,6 +39,16 @@ HEADERS = {
 
 # 默认 API 配置
 DEFAULT_MODEL = "paraformer-v2"
+DEFAULT_LOCAL_ASR_MODEL = "small"
+DEFAULT_ASR_PROVIDER = "local"
+DASHSCOPE_API_KEY_ENV = "DASHSCOPE_API_KEY"
+LEGACY_API_KEY_ENV = "API_KEY"
+LOCAL_ASR_DEVICE_ENV = "DOUYIN_LOCAL_ASR_DEVICE"
+LOCAL_ASR_COMPUTE_TYPE_ENV = "DOUYIN_LOCAL_ASR_COMPUTE_TYPE"
+ASR_PROVIDER_ENV = "DOUYIN_ASR_PROVIDER"
+
+_WHISPER_MODEL_CACHE: dict[str, object] = {}
+_WHISPER_MODEL_CACHE_LOCK = Lock()
 
 
 class DouyinProcessor:
@@ -47,8 +58,9 @@ class DouyinProcessor:
         self.api_key = api_key
         self.model = model or DEFAULT_MODEL
         self.temp_dir = Path(tempfile.mkdtemp())
-        # 设置阿里云百炼API密钥
-        dashscope.api_key = api_key
+        # 设置阿里云百炼API密钥（仅在提供 key 时设置）
+        if api_key:
+            dashscope.api_key = api_key
     
     def __del__(self):
         """清理临时目录"""
@@ -187,6 +199,37 @@ class DouyinProcessor:
                 
         except Exception as e:
             raise Exception(f"提取文字时出错: {str(e)}")
+
+    def extract_text_from_local_audio(self, audio_path: Path, local_model: str, language: Optional[str] = None) -> str:
+        """使用本地 faster-whisper 模型从音频文件提取文本"""
+        cache_key = "|".join(
+            [
+                local_model,
+                os.getenv(LOCAL_ASR_DEVICE_ENV, "auto"),
+                os.getenv(LOCAL_ASR_COMPUTE_TYPE_ENV, "int8"),
+            ]
+        )
+        with _WHISPER_MODEL_CACHE_LOCK:
+            whisper_model = _WHISPER_MODEL_CACHE.get(cache_key)
+            if whisper_model is None:
+                from faster_whisper import WhisperModel
+
+                whisper_model = WhisperModel(
+                    local_model,
+                    device=os.getenv(LOCAL_ASR_DEVICE_ENV, "auto"),
+                    compute_type=os.getenv(LOCAL_ASR_COMPUTE_TYPE_ENV, "int8"),
+                )
+                _WHISPER_MODEL_CACHE[cache_key] = whisper_model
+
+        segments, _ = whisper_model.transcribe(
+            str(audio_path),
+            language=language,
+            vad_filter=True,
+        )
+        text = "".join(segment.text for segment in segments).strip()
+        if not text:
+            return "未识别到文本内容"
+        return text
     
     def cleanup_files(self, *file_paths: Path):
         """清理指定的文件"""
@@ -230,6 +273,8 @@ def get_douyin_download_link(share_link: str) -> str:
 async def extract_douyin_text(
     share_link: str,
     model: Optional[str] = None,
+    asr_provider: Optional[Literal["local", "dashscope"]] = None,
+    language: Optional[str] = None,
     ctx: Context = None
 ) -> str:
     """
@@ -237,28 +282,44 @@ async def extract_douyin_text(
     
     参数:
     - share_link: 抖音分享链接或包含链接的文本
-    - model: 语音识别模型（可选，默认使用paraformer-v2）
+    - model: 语音识别模型（可选；local 模式默认 small，dashscope 模式默认 paraformer-v2）
+    - asr_provider: 语音识别后端（local 或 dashscope），默认 local
+    - language: 指定识别语言（可选，如 zh / en）
     
     返回:
     - 提取的文本内容
     
-    注意: 需要设置环境变量 API_KEY
+    注意:
+    - local 模式默认不需要云端 API Key
+    - dashscope 模式需要 DASHSCOPE_API_KEY（兼容旧变量 API_KEY）
     """
     try:
-        # 从环境变量获取API密钥
-        api_key = os.getenv('API_KEY')
-        if not api_key:
-            raise ValueError("未设置环境变量 API_KEY，请在配置中添加阿里云百炼API密钥")
-        
-        processor = DouyinProcessor(api_key, model)
+        provider = (asr_provider or os.getenv(ASR_PROVIDER_ENV, DEFAULT_ASR_PROVIDER)).lower()
+        if provider not in {"local", "dashscope"}:
+            raise ValueError(f"不支持的 asr_provider: {provider}，可选值: local, dashscope")
+
+        dashscope_key = os.getenv(DASHSCOPE_API_KEY_ENV) or os.getenv(LEGACY_API_KEY_ENV, "")
+        processor = DouyinProcessor(dashscope_key if provider == "dashscope" else "", model)
         
         # 解析视频链接
         ctx.info("正在解析抖音分享链接...")
         video_info = processor.parse_share_url(share_link)
         
-        # 直接使用视频URL进行文本提取
-        ctx.info("正在从视频中提取文本...")
-        text_content = processor.extract_text_from_video_url(video_info['url'])
+        # 根据后端提取文本
+        ctx.info(f"正在使用 {provider} 后端提取文本...")
+        if provider == "dashscope":
+            if not dashscope_key:
+                raise ValueError(
+                    f"未设置 {DASHSCOPE_API_KEY_ENV}（兼容旧变量 {LEGACY_API_KEY_ENV}），"
+                    "请在环境变量中配置阿里云百炼 API Key"
+                )
+            text_content = processor.extract_text_from_video_url(video_info["url"])
+        else:
+            video_path = await processor.download_video(video_info, ctx)
+            audio_path = processor.extract_audio(video_path)
+            local_model = model or DEFAULT_LOCAL_ASR_MODEL
+            text_content = processor.extract_text_from_local_audio(audio_path, local_model, language)
+            processor.cleanup_files(video_path, audio_path)
         
         ctx.info("文本提取完成!")
         return text_content
@@ -327,16 +388,19 @@ def douyin_text_extraction_guide() -> str:
 这个MCP服务器可以从抖音分享链接中提取视频的文本内容，以及获取无水印下载链接。
 
 ## 环境变量配置
-请确保设置了以下环境变量：
-- `API_KEY`: 阿里云百炼API密钥
+可选环境变量：
+- `DOUYIN_ASR_PROVIDER`: `local`（默认）或 `dashscope`
+- `DASHSCOPE_API_KEY`: 阿里云百炼 API Key（仅 dashscope 模式需要）
+- `DOUYIN_LOCAL_ASR_DEVICE`: 本地 ASR 设备（默认 `auto`）
+- `DOUYIN_LOCAL_ASR_COMPUTE_TYPE`: 本地 ASR 计算类型（默认 `int8`）
 
 ## 使用步骤
 1. 复制抖音视频的分享链接
-2. 在Claude Desktop配置中设置环境变量 API_KEY
+2. 如果使用 dashscope 后端，在配置中设置环境变量 DASHSCOPE_API_KEY
 3. 使用相应的工具进行操作
 
 ## 工具说明
-- `extract_douyin_text`: 完整的文本提取流程（需要API密钥）
+- `extract_douyin_text`: 完整的文本提取流程（默认本地 ASR；可切换 dashscope）
 - `get_douyin_download_link`: 获取无水印视频下载链接（无需API密钥）
 - `parse_douyin_video_info`: 仅解析视频基本信息
 - `douyin://video/{video_id}`: 获取指定视频的详细信息
@@ -349,7 +413,7 @@ def douyin_text_extraction_guide() -> str:
       "command": "uvx",
       "args": ["douyin-mcp-server"],
       "env": {
-        "API_KEY": "your-api-key-here"
+        "DOUYIN_ASR_PROVIDER": "local"
       }
     }
   }
@@ -357,8 +421,8 @@ def douyin_text_extraction_guide() -> str:
 ```
 
 ## 注意事项
-- 需要提供有效的阿里云百炼API密钥（通过环境变量）
-- 使用阿里云百炼的paraformer-v2模型进行语音识别
+- 默认使用本地 faster-whisper（无云端 API 成本）
+- 切换到 dashscope 时才需要提供阿里云百炼 API Key
 - 支持大部分抖音视频格式
 - 获取下载链接无需API密钥
 """

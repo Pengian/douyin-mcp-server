@@ -27,6 +27,7 @@ dependencies = [
     "ffmpeg-python",
     "tqdm",
     "dashscope",
+    "faster-whisper",
     "fastapi",
     "uvicorn",
     "jinja2",

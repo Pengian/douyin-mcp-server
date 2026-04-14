@@ -15,7 +15,7 @@
 ## ✨ 功能特性
 
 - 🎬 **无水印视频** - 获取高质量无水印视频下载链接
-- 🎙️ **AI 语音识别** - 使用硅基流动 SenseVoice 自动提取文案
+- 🎙️ **AI 语音识别** - 默认本地 `faster-whisper`，可选 DashScope 云端识别
 - 📑 **大文件支持** - 自动分段处理超过 1 小时或 50MB 的音频
 - 🌐 **WebUI** - 现代化浏览器界面，无需命令行
 - 🔌 **MCP 集成** - 支持 Claude Desktop 等 AI 应用
@@ -105,7 +105,24 @@ uv run python web/app.py
       "command": "uvx",
       "args": ["douyin-mcp-server"],
       "env": {
-        "API_KEY": "sk-xxxxxxxxxxxxxxxx"
+        "DOUYIN_ASR_PROVIDER": "local"
+      }
+    }
+  }
+}
+```
+
+如需切换云端识别（DashScope）：
+
+```json
+{
+  "mcpServers": {
+    "douyin-mcp": {
+      "command": "uvx",
+      "args": ["douyin-mcp-server"],
+      "env": {
+        "DOUYIN_ASR_PROVIDER": "dashscope",
+        "DASHSCOPE_API_KEY": "sk-xxxxxxxxxxxxxxxx"
       }
     }
   }
@@ -118,7 +135,20 @@ uv run python web/app.py
 |--------|------|:--------:|
 | `parse_douyin_video_info` | 解析视频信息 | ❌ |
 | `get_douyin_download_link` | 获取下载链接 | ❌ |
-| `extract_douyin_text` | 提取视频文案 | ✅ |
+| `extract_douyin_text` | 提取视频文案 | 默认 ❌（local）/ 可选 ✅（dashscope） |
+
+### ASR 后端说明
+
+- 默认后端：`local`（本地 `faster-whisper`，不需要云端 API Key）
+- 可选后端：`dashscope`（需要 `DASHSCOPE_API_KEY`）
+- 后端切换方式：
+  - 配置全局环境变量：`DOUYIN_ASR_PROVIDER=local|dashscope`
+  - 或调用 `extract_douyin_text` 时传 `asr_provider`
+
+本地后端可选参数：
+
+- `DOUYIN_LOCAL_ASR_DEVICE`：默认 `auto`
+- `DOUYIN_LOCAL_ASR_COMPUTE_TYPE`：默认 `int8`
 
 ### 对话示例
 
